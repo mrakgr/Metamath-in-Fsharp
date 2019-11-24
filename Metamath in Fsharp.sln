@@ -1,0 +1,31 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 16
+VisualStudioVersion = 16.0.29509.3
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{F2A71F9B-5D33-465A-A702-920D77279786}") = "Metamath in Fsharp", "Metamath in Fsharp.fsproj", "{CABE55DB-193D-467E-BFC1-CFA20860BAA4}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Metamath in Csharp", "..\Metamath in Csharp\Metamath in Csharp.csproj", "{1935D353-F5DA-40FC-8FE0-3ADD03712B48}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{CABE55DB-193D-467E-BFC1-CFA20860BAA4}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{CABE55DB-193D-467E-BFC1-CFA20860BAA4}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{CABE55DB-193D-467E-BFC1-CFA20860BAA4}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{CABE55DB-193D-467E-BFC1-CFA20860BAA4}.Release|Any CPU.Build.0 = Release|Any CPU
+		{1935D353-F5DA-40FC-8FE0-3ADD03712B48}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{1935D353-F5DA-40FC-8FE0-3ADD03712B48}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{1935D353-F5DA-40FC-8FE0-3ADD03712B48}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{1935D353-F5DA-40FC-8FE0-3ADD03712B48}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {B3C5D333-2468-42DF-8330-E43C82D0EB07}
+	EndGlobalSection
+EndGlobal
