@@ -1,0 +1,1 @@
+Implementation of Metamath in F# for the sake of learning its internals.
