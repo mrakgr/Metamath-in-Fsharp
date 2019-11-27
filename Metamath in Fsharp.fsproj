@@ -47,9 +47,8 @@
   <Import Project="$(FSharpTargetsPath)" />
   <ItemGroup>
     <Compile Include="AssemblyInfo.fs" />
-    <None Include="App.config" />
+    <Content Include="App.config" />
     <Content Include="packages.config" />
-    <Compile Include="Metamath\Program.fs" />
     <None Include="Metamath\Script1.fsx" />
     <None Include="Metamath\Script2.fsx" />
     <None Include="Metamath\Script3.fsx" />
