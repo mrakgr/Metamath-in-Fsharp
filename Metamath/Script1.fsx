@@ -1,6 +1,6 @@
 ﻿#if INTERACTIVE
-#r @"packages\FParsec.1.1.0-RC\lib\net45\FParsecCS.dll"
-#r @"packages\FParsec.1.1.0-RC\lib\net45\FParsec.dll"
+#r @"..\packages\FParsec.1.1.0-RC\lib\net45\FParsecCS.dll"
+#r @"..\packages\FParsec.1.1.0-RC\lib\net45\FParsec.dll"
 #endif
 open FParsec
 
