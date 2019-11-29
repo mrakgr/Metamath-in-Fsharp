@@ -73,10 +73,6 @@ let er_label_is_active label = er (sprintf "Label %s is already active." label)
 let check_floating var on_succ u =
     if Set.contains var u.vars_floating then on_succ {u with vars_floating=Set.add var u.vars_floating}
     else er (sprintf "There may not be two active $f statements containing the same variable %s." var)
-let check_labels_floating label con on_succ u =
-    match Map.tryFind label u.labels_floating with
-    | Some con' -> if con = con' then on_succ u else er (sprintf "Labels for $f statements must have uniform typecode across the database. %s $f %s _ <> %s $f %s _" label con label con')
-    | None -> on_succ {u with labels_floating=Map.add label con u.labels_floating}
 let pcheck_and_add f x (s : CharStream<_>) : Reply<_> = f x (fun u -> s.UserState <- u; Reply(x)) s.UserState
 
 type IsWrap = NoWrap | Wrap
@@ -97,7 +93,7 @@ let floating label s =
     add_label NoWrap Hypothesis (
         skip_string "$f" >>.
         pipe2 
-            (active_constant >>= pcheck_and_add (check_labels_floating label) .>> spaces1) 
+            (active_constant .>> spaces1) 
             (active_variable >>= pcheck_and_add check_floating .>> spaces1 .>> terminal "$.") 
             (fun con var -> ExprF(label,con,var))
         ) label s
@@ -138,7 +134,7 @@ let block next s =
     between (skip_string "${") (terminal "$}") (f (many_array next) |>> ExprBlock) s
 
 let comment s = 
-    let rec body s = (charsTillString "$" true System.Int32.MaxValue >>. (skipChar ')' <|> (skipChar '(' >>. body >>. body) <|> body)) s
+    let rec body s = (charsTillString "$" true System.Int32.MaxValue >>. (skipChar ')' <|> (skipChar '(' >>. fail "Nested comments are not allowed.") <|> body)) s
     (skipString "$(" >>. body >>. (spaces1 <|> eof)) s
 
 let proceed_if_inactive_label label (s : CharStream<_>) =
