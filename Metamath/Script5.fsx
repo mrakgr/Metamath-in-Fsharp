@@ -7,31 +7,30 @@
 open FParsec
 
 type Label = int
-type Disjoint = Map<string, Set<string>>
-type Floating = Map<string,Label>
 type Labels = Set<Label>
-type SymbolSequence = string []
+type Disjoints = Map<string,Set<string>>
+type Symbol = Constant of string | Variable of string
+type Symbols = Symbol []
 
 type Statement =
     | Floating of string * string
-    | Essential of string * SymbolSequence * Disjoint * Labels
-    | Axiom of string * SymbolSequence * Disjoint * Labels 
-    | Proof of string * SymbolSequence * Disjoint * Labels
+    | Essential of string * Symbols * Disjoints
+    | Axiom of string * Symbols * Disjoints * Statement list 
+    | Proof of string * Symbols * Disjoints * Statement list
 
 type State = { 
     // Local
-    vars : Set<string>
-    disjoint : Disjoint
-    floating : Floating
-    essential : Labels
+    disjoints : Disjoints
+    vars : Map<string,Label option>
+    essentials : Labels // includes the free vars of the essentials
     // Global
     cons : HashSet<string>
-    label_tag : Dictionary<string,Label>
+    labels : Dictionary<string,Label>
     statements : Dictionary<Label,Statement>
     }
 
-let tag (x : State) v = x.label_tag.[v]
-let tag_create (x : State) label = let c = x.label_tag.Count in x.label_tag.Add(label, c); c
+let tag (x : State) v = x.labels.[v]
+let tag_create (x : State) label = let c = x.labels.Count in x.labels.Add(label, c); c
 
 let many_array_first_elem x0 = let ra = ResizeArray<_>() in ra.Add(x0); ra
 let many_array_fold_state (ra : ResizeArray<_>) x = ra.Add(x); ra
@@ -57,18 +56,11 @@ let inline proceed_if_active check x (s : CharStream<_>) =
     if check x s.UserState then Reply(x)
     else er (sprintf "%s must be active." x)
 
-let add_if_inactive get set x' (s : CharStream<_>) =
-    let u = s.UserState
-    let x = tag u x'
-    let a = get u
-    if Set.contains x a then s.UserState <- set u (Set.add x a); Reply(x)
-    else er (sprintf "%s is already active." x')
-
 let var s = 
     (math_symbol >>= fun x s -> 
         let u = s.UserState
         let a = u.vars
-        if Set.contains x a then s.UserState <- {u with vars=Set.add x a}; Reply(x)
+        if Map.containsKey x a then s.UserState <- {u with vars=Map.add x None a}; Reply(())
         else er (sprintf "Variable %s is already active." x)
         ) s
 
@@ -84,14 +76,25 @@ let vars s = (between (skip_string "$v") (terminal "$.") (skipMany (var >>. spac
 let cons s = (between (skip_string "$c") (terminal "$.") (skipMany (con >>. spaces1))) s
 
 //let is_label_inactive x u = (Set.contains x u.labels_hypothesis || Set.contains x u.labels_assertion || Set.contains x u.vars || Set.contains x u.cons) = false
+let is_floating_var x u =
+    match Map.tryFind x u.vars with
+    | Some (Some _) -> true
+    | _ -> false
 
 let active_constant s = (math_symbol >>= proceed_if_active (fun x u -> u.cons.Contains x)) s
-let active_variable s = (math_symbol >>= proceed_if_active (fun x u -> Set.contains x u.vars)) s
-let floating_math_symbol s = (math_symbol >>= proceed_if_active (fun x u -> Map.containsKey x u.floating || u.cons.Contains x)) s
+let active_variable s = (math_symbol >>= proceed_if_active (fun x u -> Map.containsKey x u.vars)) s
+let floating_math_symbol s = 
+    (math_symbol >>= fun x s ->
+        let u : State = s.UserState
+        if u.cons.Contains x then Reply(Constant x)
+        else match Map.tryFind x u.vars with
+             | Some(Some t) -> Reply(Variable x)
+             | _ -> er (sprintf "%s is neither a constant nor an active variable" x)
+        ) s
 
 let er_label_is_active label = er (sprintf "Label %s is already active." label)
 let check_floating var (s : CharStream<_>) =
-    if Map.containsKey var s.UserState.floating then Reply(var)
+    if is_floating_var var s.UserState = false then Reply(var)
     else er (sprintf "There may not be two active $f statements containing the same variable %s." var)
 
 let floating label s = 
@@ -102,18 +105,28 @@ let floating label s =
         updateUserState (fun u ->
             let tag = tag_create u label
             u.statements.Add(tag,Floating(con, var))
-            {u with floating=Map.add label tag u.floating}
+            {u with vars=Map.add label (Some tag) u.vars}
             )
     ) s
 
-let vars_sequence m ar =
-    Array.fold (fun s x ->
-        match Map.tryFind x m with
-        | Some t -> Set.add t s
-        | None -> s
+let free_vars (u : State) ar =
+    Array.fold (fun s -> function
+        | Variable x -> match u.vars.[x] with Some t -> Set.add t s | _ -> s
+        | Constant _ -> s
         ) Set.empty ar
 
 let modifyUserState f (s: CharStream<_>) = f s.UserState; Reply(())
+
+let disjoint_constraints (u : State) free_vars =
+    let f x' next s = function 
+        | None -> next s (Some x')
+        | Some x as prev ->
+            match Map.tryFind x u.disjoints with
+            | Some d -> if Set.contains x' d then (x,x') :: s else s
+            | None -> s
+            |> fun s -> next (next s prev) (Some x')
+    Set.foldBack f free_vars (fun s _ -> s) [] None
+
 
 let essential label s =
     (
@@ -121,8 +134,8 @@ let essential label s =
     tuple2 (active_constant .>> spaces1) (many_array (floating_math_symbol .>> spaces1) .>> terminal "$.") 
     >>= fun (c, v) -> updateUserState (fun u -> 
         let tag = tag_create u label
-        u.statements.Add(tag,Essential(c,v,u.disjoint,vars_sequence u.floating v))
-        {u with essential=Set.add tag u.essential}
+        u.statements.Add(tag,Essential(c,v,u.disjoints))
+        {u with essentials=free_vars u v + Set.add tag u.essentials}
         )
     ) s
 
@@ -134,7 +147,7 @@ let disjoint s =
         (skipMany (active_variable >>= (fun x -> check (h.Add(x)) (sprintf "%s cannot be disjoint with itself." x)) >>. spaces1))
     >>= (fun _ -> check (h.Count >= 2) "The $d statement needs at least two variables")
     >>= fun _ -> updateUserState (fun u ->
-        {u with disjoint=
+        {u with disjoints=
                 let f x' next x disjoint =
                     match x with
                     | None -> next (Some x') disjoint
@@ -145,34 +158,35 @@ let disjoint s =
                             | None -> Map.add x (Set.singleton x') m
                         disjoint |> add x x' |> add x' x |> next prev |> next (Some x')
 
-                Seq.foldBack f h (fun _ x -> x) None u.disjoint
+                Seq.foldBack f h (fun _ x -> x) None u.disjoints
             }
         )
     ) s
-        
 
+let labels_to_statements (u : State) x = Set.toList x |> List.map (fun x -> u.statements.[x])
+        
 let axiom label s = 
     (
     skip_string "$a" >>.
     tuple2 (active_constant .>> spaces1) (many_array (floating_math_symbol .>> spaces1))
     >>= fun (c,sym_seq) -> modifyUserState (fun u -> 
         let tag = tag_create u label
-        u.statements.Add(tag,Axiom(c,sym_seq,u.disjoint,vars_sequence u.floating sym_seq + vars_essential u))
+        u.statements.Add(tag,Axiom(c,sym_seq,u.disjoints,labels_to_statements u (free_vars u sym_seq + u.essentials)))
         )
     >>. terminal "$." 
     ) s
 
-let active_label s = (label >>= proceed_if_active (fun x u -> u.label_tag.ContainsKey x)) s
+let active_label s = (label >>= proceed_if_active (fun x u -> u.labels.ContainsKey x)) s
 
 let prove_label stack' label (s : CharStream<State>) =
     let u = s.UserState
-    match u.statements.[u.label_tag.[label]] with
+    match u.statements.[u.labels.[label]] with
     | Floating(c,v) -> stack' := (c,[|v|]) :: !stack'; Reply(())
     | Essential _ -> er "Essential hypotheses are not directly usable."
     | Axiom(con,sym_seq,disjoint,hyps) | Proof(con,sym_seq,disjoint,hyps) ->
         let rec loop_unify m stack = function
-            | (Floating(c,v),(c',[|v'|])) :: ops -> if c = c' then loop_unify (Map.add c' v' m) stack ops else er (sprintf "Unification failed. Typecode %s <> %s" c c')
-            | (Essential(c,sym_seq,disjoint,hyps),(c',sym_seq')) :: ops -> 
+            | (Floating(c,v),(c',v')) :: ops -> if c = c' then loop_unify (Map.add v v' m) stack ops else er (sprintf "Unification failed. Typecode %s <> %s" c c')
+            | (Essential(c,sym_seq,disjoint),(c',sym_seq')) :: ops -> 
                 if c = c' then
                     let sym_seq = substitute m sym_seq
                     if sym_seq = sym_seq' then disjointness_check disjoint
