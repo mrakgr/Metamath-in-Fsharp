@@ -6,6 +6,8 @@
 #endif
 open FParsec
 
+/// Types
+
 type Label = int
 type Labels = Set<Label>
 type Disjoints = Map<string,Set<string>>
@@ -15,10 +17,12 @@ type Symbols = Symbol []
 type Statement =
     | Floating of string * string
     | Essential of string * Symbols * Disjoints
-    | Axiom of string * Symbols * Disjoints * Statement list 
-    | Proof of string * Symbols * Disjoints * Statement list
+    | Axiom of string * Symbols * Disjoints * Statement [] 
+    | Proof of string * Symbols * Disjoints * Statement []
 
-type State = { 
+/// Parsing
+
+type State = {
     // Local
     disjoints : Disjoints
     vars : Map<string,Label option>
@@ -29,7 +33,6 @@ type State = {
     statements : Dictionary<Label,Statement>
     }
 
-let tag (x : State) v = x.labels.[v]
 let tag_create (x : State) label = let c = x.labels.Count in x.labels.Add(label, c); c
 
 let many_array_first_elem x0 = let ra = ResizeArray<_>() in ra.Add(x0); ra
@@ -75,7 +78,6 @@ let con s =
 let vars s = (between (skip_string "$v") (terminal "$.") (skipMany (var >>. spaces1))) s
 let cons s = (between (skip_string "$c") (terminal "$.") (skipMany (con >>. spaces1))) s
 
-//let is_label_inactive x u = (Set.contains x u.labels_hypothesis || Set.contains x u.labels_assertion || Set.contains x u.vars || Set.contains x u.cons) = false
 let is_floating_var x u =
     match Map.tryFind x u.vars with
     | Some (Some _) -> true
@@ -93,11 +95,10 @@ let floating_math_symbol s =
         ) s
 
 let er_label_is_active label = er (sprintf "Label %s is already active." label)
-let check_floating var (s : CharStream<_>) =
-    if is_floating_var var s.UserState = false then Reply(var)
-    else er (sprintf "There may not be two active $f statements containing the same variable %s." var)
-
 let floating label s = 
+    let check_floating var (s : CharStream<_>) =
+        if is_floating_var var s.UserState = false then Reply(var)
+        else er (sprintf "There may not be two active $f statements containing the same variable %s." var)
     (
     skip_string "$f" >>.
     tuple2 (active_constant .>> spaces1) (active_variable >>= check_floating .>> spaces1 .>> terminal "$.") 
@@ -115,19 +116,6 @@ let free_vars (u : State) ar =
         | Constant _ -> s
         ) Set.empty ar
 
-let modifyUserState f (s: CharStream<_>) = f s.UserState; Reply(())
-
-let disjoint_constraints (u : State) free_vars =
-    let f x' next s = function 
-        | None -> next s (Some x')
-        | Some x as prev ->
-            match Map.tryFind x u.disjoints with
-            | Some d -> if Set.contains x' d then (x,x') :: s else s
-            | None -> s
-            |> fun s -> next (next s prev) (Some x')
-    Set.foldBack f free_vars (fun s _ -> s) [] None
-
-
 let essential label s =
     (
     skip_string "$e" >>.
@@ -143,8 +131,8 @@ let disjoint s =
     let check x msg _ = if x then Reply(()) else er msg
     let h = HashSet(HashIdentity.Structural)
     (
-    between (skip_string "$d") (terminal "$.") 
-        (skipMany (active_variable >>= (fun x -> check (h.Add(x)) (sprintf "%s cannot be disjoint with itself." x)) >>. spaces1))
+    skip_string "$d"
+    >>. (skipMany (active_variable >>= (fun x -> check (h.Add(x)) (sprintf "%s cannot be disjoint with itself." x)) >>. spaces1))
     >>= (fun _ -> check (h.Count >= 2) "The $d statement needs at least two variables")
     >>= fun _ -> updateUserState (fun u ->
         {u with disjoints=
@@ -161,10 +149,12 @@ let disjoint s =
                 Seq.foldBack f h (fun _ x -> x) None u.disjoints
             }
         )
+    >>. terminal "$."
     ) s
 
-let labels_to_statements (u : State) x = Set.toList x |> List.map (fun x -> u.statements.[x])
-        
+let labels_to_statements (u : State) x = Set.toArray x |> Array.map (fun x -> u.statements.[x])
+    
+let modifyUserState f (s: CharStream<_>) = f s.UserState; Reply(())
 let axiom label s = 
     (
     skip_string "$a" >>.
@@ -178,52 +168,36 @@ let axiom label s =
 
 let active_label s = (label >>= proceed_if_active (fun x u -> u.labels.ContainsKey x)) s
 
-let prove_label stack' label (s : CharStream<State>) =
-    let u = s.UserState
-    match u.statements.[u.labels.[label]] with
-    | Floating(c,v) -> stack' := (c,[|v|]) :: !stack'; Reply(())
-    | Essential _ -> er "Essential hypotheses are not directly usable."
-    | Axiom(con,sym_seq,disjoint,hyps) | Proof(con,sym_seq,disjoint,hyps) ->
-        let rec loop_unify m stack = function
-            | (Floating(c,v),(c',v')) :: ops -> if c = c' then loop_unify (Map.add v v' m) stack ops else er (sprintf "Unification failed. Typecode %s <> %s" c c')
-            | (Essential(c,sym_seq,disjoint),(c',sym_seq')) :: ops -> 
-                if c = c' then
-                    let sym_seq = substitute m sym_seq
-                    if sym_seq = sym_seq' then disjointness_check disjoint
-                    else er "Unification failed."
-                else er (sprintf "Unification failed. Typecode %s <> %s" c c')
-            | [] -> stack' := (con, substitute m sym_seq') :: stack; Reply(())
-            | _ -> failwith "impossible"
+let print_body (c, v) = 
+    let strip x = Array.map (function Variable x | Constant x -> x) x
+    [|[|c|]; strip v|] |> Array.concat |> String.concat " "
+let error_typecode c c' = sprintf "Unification failed. Typecode %s <> %s" c c'
+let error_body a b = sprintf "Unification failed. %s <> %s" (print_body a) (print_body b)
 
-        let rec loop_init ops hyps stack =
-            match hyps, stack with
-            | [], stack -> loop_unify Map.empty stack ops
-            | (h :: h'), (d :: d') -> loop_init ((u.statements.[h],d) :: ops) h' d'
-            | _, [] -> er "Not enough hypotheses on the stack."
-
-        let hyps = Set.fold (fun b a -> a :: b) [] hyps
-        loop_init [] hyps !stack'
-        
-
-let proof label s = 
+let proof prove label s = 
     (
     skip_string "$p" >>.
     tuple2 (active_constant .>> spaces1) (many_array (floating_math_symbol .>> spaces1)) 
     .>> skip_string "$="
-    >>= fun (c,v) -> 
-        let stack = ref []
-        let prove_label = fun label s -> failwith ""
-        let prove_finish s =
-            let concat (c,v) = sprintf "%s %s" c (String.concat " " v)
-            match !stack with
-            | [c',v'] -> if c <> c' || v <> v' then er (sprintf "Unification failed. The expression %s fails to prove the proof %s" (concat (c,v)) (concat (c',v'))) else Reply(())
-            | l -> 
-                List.map concat l
+    >>= fun (c,sym_seq) ->
+        let stack = Stack()
+        let prove hyp = prove stack hyp (fun () -> Reply(())) er
+        let prove_label label (s : CharStream<State>) = let u = s.UserState in prove u.statements.[u.labels.[label]]
+        let prove_finish s = 
+            if stack.Count = 1 then 
+                let (c',sym_seq') = stack.Pop() 
+                if (c,sym_seq) = (c',sym_seq') then Reply(()) else er (error_body (c,sym_seq) (c',sym_seq'))
+            else 
+                Seq.map print_body stack
                 |> String.concat "\n"
-                |> sprintf "Unification failed. A single term must be left at the end of the proof. Got:\n%s"
+                |> sprintf "Only one premise must be left on the stack after the labels have been processed. Got:\n%s"
                 |> er
 
         (skipMany (active_label >>= prove_label >>. spaces1) >>. prove_finish)
+        >>. modifyUserState (fun u -> 
+                let tag = tag_create u label
+                u.statements.Add(tag,Proof(c,sym_seq,u.disjoints,labels_to_statements u (free_vars u sym_seq + u.essentials)))
+                )
     >>. terminal "$."
     ) s
 
@@ -231,24 +205,104 @@ let block next s =
     let f next (s : CharStream<_>) = 
         let u = s.UserState
         let r = next s
-        s.UserState <- {s.UserState with vars=u.vars; vars_floating=u.vars_floating; labels_hypothesis=u.labels_hypothesis}
+        s.UserState <- {s.UserState with vars=u.vars; disjoints=u.disjoints; essentials=u.essentials}
         r
-    between (skip_string "${") (terminal "$}") (f (many_array next) |>> ExprBlock) s
+    between (skip_string "${") (terminal "$}") (f (skipMany next)) s
 
 let comment s = 
     let rec body s = (charsTillString "$" true System.Int32.MaxValue >>. (skipChar ')' <|> (skipChar '(' >>. fail "Nested comments are not allowed.") <|> body)) s
     (skipString "$(" >>. body >>. (spaces1 <|> eof)) s
 
-let proceed_if_inactive_label label (s : CharStream<_>) =
-    if is_label_inactive label s.UserState then Reply(label)
-    else er_label_is_active label
-let checked_label s = (label >>= proceed_if_inactive_label) s
+let checked_label s = 
+    let proceed_if_inactive_label label (s : CharStream<_>) =
+        if s.UserState.labels.ContainsKey label = false then Reply(label)
+        else er_label_is_active label
+    (label >>= proceed_if_inactive_label) s
 
-let parser s =
+let rec parser prove s =
     let rec body s = 
         choice [|
-            checked_label >>= fun label -> spaces1 >>. choice [|floating label; essential label; axiom label; proof label|]
-            vars; disjoint; comment >>. body; block body; file_include
+            checked_label >>= fun label -> spaces1 >>. choice [|floating label; essential label; axiom label; proof prove label|]
+            vars; disjoint; comment >>. body; block body; file_include prove
             |] s
 
-    (many_array (cons <|> body) |>> ExprBlock .>> eof) s
+    (skipMany (choice [|cons; file_include prove; body|] .>> eof)) s
+
+and file_include prove (s : CharStream<_>) =
+    (
+    label >>= fun x s ->
+        match runParserOnFile (parser prove) s.UserState "" System.Text.Encoding.Default with
+        | Success(r,u,_) -> s.UserState <- u; Reply(r)
+        | Failure(msg,_,_) -> er msg
+    ) s
+
+/// Proving
+
+let substitute (m : Map<string, Symbols>) (desc : Symbols) =
+    let subvars = Dictionary(HashIdentity.Structural)
+    subvars,
+    Array.collect (function
+        | Variable x as x' ->
+            match Map.tryFind x m with
+            | Some v ->
+                match subvars.TryGetValue x with
+                | false, _ -> subvars.[x] <- Array.fold (fun s -> function Variable x -> Set.add x s | Constant _ -> s) Set.empty v
+                | true, _ -> ()
+                v
+            | None -> [|x'|]
+        | Constant _ as x' -> [|x'|]
+        ) desc
+
+let disjointness_check (disjoint_vars : Map<string, Set<string>>) (substs_map : Dictionary<string, Set<string>>) =
+    let fails = ResizeArray()
+
+    let check (kv : KeyValuePair<_,_>) next prev = 
+        let var', subvars' as cur = kv.Key, kv.Value
+        match prev with
+        | None -> ()
+        | Some (var, subvars) as prev ->
+            Set.iter (fun v ->
+                let v_disjoint_vars =
+                    match Map.tryFind v disjoint_vars with
+                    | None -> Set.empty
+                    | Some v_disjoint_vars -> v_disjoint_vars
+                if Set.isEmpty (subvars' - v_disjoint_vars) = false then fails.Add((var,v),(var',subvars'))
+                ) subvars
+            next prev
+        next (Some cur)
+
+    Seq.foldBack check substs_map (fun _ -> ()) None
+    fails.ToArray()
+
+let inline prove_mandatory m hyp item on_succ on_fail =
+    match hyp, item with
+    | Floating(c,v),(c',v') -> if c = c' then on_succ (Map.add v v' m) else on_fail (error_typecode c c')
+    | Essential(c,sym_seq,disjoint),(c',sym_seq') -> 
+        if c = c' then
+            let substituted_vars, sym_seq = substitute m sym_seq
+            if sym_seq = sym_seq' then 
+                let r = disjointness_check disjoint substituted_vars
+                if Array.isEmpty r then on_succ m
+                else 
+                    Array.map (fun ((var,v),(var',subvars)) -> sprintf "The disjointness check for %s and %s failed. %s does not interstect %A" var var' v subvars) r
+                    |> String.concat "\n"
+                    |> on_fail
+            else
+                on_fail (error_body (c,sym_seq) (c', sym_seq'))
+        else on_fail (error_typecode c c')
+    | _ -> failwith "impossible"
+
+let prove (stack : Stack<_>) x on_succ on_fail = 
+    match x with
+    | Floating(c,v) -> stack.Push(c,[|Variable v|]); None
+    | Essential _ -> Some "Essential hypotheses are not directly usable."
+    | Proof(con,sym_seq,disjoint,hyps) | Axiom(con,sym_seq,disjoint,hyps) when hyps.Length > stack.Count -> Some "Not enough hypotheses on stack."
+    | Proof(con,sym_seq,disjoint,hyps) | Axiom(con,sym_seq,disjoint,hyps) ->
+        let stack_items = Array.zeroCreate hyps.Length
+        let rec pop i = if i > 0 then stack_items.[i-1] <- stack.Pop(); pop (i-1) else ()
+        pop hyps.Length
+        
+        let rec loop i s = 
+            if i < hyps.Length then prove_mandatory s hyps.[i] stack_items.[i] (loop (i+1)) (on_fail << sprintf "(error for item %i out of %i) %s" (i+1) hyps.Length)
+            else on_succ()
+        loop 0 Map.empty

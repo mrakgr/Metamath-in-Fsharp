@@ -54,6 +54,7 @@
     <None Include="Metamath\Script3.fsx" />
     <None Include="Metamath\Script4.fsx" />
     <None Include="Metamath\Script5.fsx" />
+    <None Include="Metamath\Script6.fsx" />
   </ItemGroup>
   <ItemGroup>
     <Reference Include="FParsec">
