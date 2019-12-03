@@ -210,7 +210,8 @@ let proof label s =
                     if Set.contains var' d then
                         Set.iter (fun v ->
                             let v_disjoint_vars = Option.defaultValue Set.empty (Map.tryFind v disjoint_vars)
-                            if Set.isEmpty (subvars' - v_disjoint_vars) = false then fails.Add((var,v),(var',subvars'))
+                            let violations = subvars' - v_disjoint_vars
+                            Set.iter (fun v' -> fails.Add((var,v),(var',v'))) violations
                             ) subvars
                 next prev
 
@@ -221,8 +222,11 @@ let proof label s =
             let r = disjointness_check disjoint substituted_vars
             if Array.isEmpty r then on_succ ()
             else 
-                Array.map (fun ((var,v),(var',subvars)) -> sprintf "The disjointness check for %s and %s failed. %s does not interstect %A" var var' v subvars) r
-                |> String.concat "\n"
+                Array.map (fun ((var,v),(var',v')) -> 
+                    if v = v' then sprintf "The variables %s and %s which should be disjoint have %s in common." var var' v
+                    else sprintf "The variables %s and %s which should be disjoint have %s which does not have disjointness constraints for %s." var var' v v'
+                    ) r
+                |> String.concat "\n" // TODO: Fparsec is eating newlines here.
                 |> on_fail
 
         let prove_mandatory m hyp item on_succ on_fail =
@@ -315,23 +319,24 @@ and file_include (s : CharStream<_>) =
         | Failure(msg,_,_) -> er msg
     ) s
 
-let verify prog =
-    let userstate = 
-        {
-        disjoints = Map.empty
-        vars = Map.empty
-        essentials = Set.empty
+let default_userstate () = 
+    {
+    disjoints = Map.empty
+    vars = Map.empty
+    essentials = Set.empty
 
-        cons = HashSet(HashIdentity.Structural)
-        labels = Dictionary(HashIdentity.Structural)
-        statements = Dictionary(HashIdentity.Structural)
-        } 
+    cons = HashSet(HashIdentity.Structural)
+    labels = Dictionary(HashIdentity.Structural)
+    statements = Dictionary(HashIdentity.Structural)
+    } 
 
-    runParserOnString parser userstate "main" prog 
+
+let verify prog = runParserOnString parser (default_userstate()) "main" prog
+let verify_file path = runParserOnFile parser (default_userstate()) path System.Text.Encoding.Default
 
 /// Testing
 
-let demo =
+let demo0 =
     """
 $( Declare the constant symbols we will use $)
 $c 0 + = -> ( ) term wff |- $.
@@ -366,6 +371,7 @@ tt tze tpl tt tt a1 mp mp
 $.
     """
 
-match verify demo with
+match verify demo0 with
 | Success _ -> printfn "Verification finished successfully."
 | Failure(msg,b,c) -> printfn "%s" msg
+
