@@ -49,12 +49,7 @@
     <Compile Include="AssemblyInfo.fs" />
     <Content Include="App.config" />
     <Content Include="packages.config" />
-    <None Include="Metamath\Script1.fsx" />
-    <None Include="Metamath\Script2.fsx" />
-    <None Include="Metamath\Script3.fsx" />
-    <None Include="Metamath\Script4.fsx" />
-    <None Include="Metamath\Script5.fsx" />
-    <None Include="Metamath\Script6.fsx" />
+    <None Include="main.fsx" />
   </ItemGroup>
   <ItemGroup>
     <Reference Include="FParsec">
