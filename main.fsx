@@ -1,8 +1,8 @@
 ﻿open System.Collections.Generic
 
 #if INTERACTIVE
-#r @"..\packages\FParsec.1.1.0-RC\lib\net45\FParsecCS.dll"
-#r @"..\packages\FParsec.1.1.0-RC\lib\net45\FParsec.dll"
+#r @"packages\FParsec.1.1.0-RC\lib\net45\FParsecCS.dll"
+#r @"packages\FParsec.1.1.0-RC\lib\net45\FParsec.dll"
 #endif
 open FParsec
 
@@ -321,15 +321,9 @@ and file_include (s : CharStream<_>) =
 
 let default_userstate () = 
     {
-    disjoints = Map.empty
-    vars = Map.empty
-    essentials = Set.empty
-
-    cons = HashSet(HashIdentity.Structural)
-    labels = Dictionary(HashIdentity.Structural)
-    statements = Dictionary(HashIdentity.Structural)
+    disjoints = Map.empty; vars = Map.empty; essentials = Set.empty
+    cons = HashSet(HashIdentity.Structural); labels = Dictionary(HashIdentity.Structural); statements = Dictionary(HashIdentity.Structural)
     } 
-
 
 let verify prog = runParserOnString parser (default_userstate()) "main" prog
 let verify_file path = runParserOnFile parser (default_userstate()) path System.Text.Encoding.Default
