@@ -51,6 +51,12 @@ let is_math_symbol c = '!' <= c && c <= '~' && c <> '$'
 let label s = (many1SatisfyL is_label "Ascii letter, digit, `-`, `_` or `.`") s
 let math_symbol s = (many1SatisfyL is_math_symbol "Ascii character between `!` and `~` (excluding `$`.)") s
 
+let comment s =
+    let rec body s = (charsTillString "$" true System.Int32.MaxValue >>. (skipChar ')' <|> (skipChar '(' >>. fail "Nested comments are not allowed.") <|> body)) s
+    (skipMany (skipString "$(" >>. body >>. (spaces1 <|> eof))) s
+
+let spaces1 s = (spaces1 >>. comment) s
+let spaces s = (spaces >>. comment) s
 let terminal x s = (skipString x >>. (spaces1 <|> eof)) s
 let skip_string x s = (skipString x >>. spaces1) s 
 
@@ -106,7 +112,7 @@ let floating label s =
         updateUserState (fun u ->
             let tag = tag_create u label
             u.statements.Add(tag,Floating(con, var))
-            {u with vars=Map.add label (Some tag) u.vars}
+            {u with vars=Map.add var (Some tag) u.vars}
             )
     ) s
 
@@ -178,57 +184,55 @@ let proof label s =
     
     /// Proving
     let prove (stack : Stack<_>) x on_succ on_fail = 
-        let prove_mandatory m hyp item on_succ on_fail =
-            let substitute (m : Map<string, Symbols>) (desc : Symbols) =
-                let subvars = Dictionary(HashIdentity.Structural)
-                subvars,
-                Array.collect (function
-                    | Variable x as x' ->
-                        match Map.tryFind x m with
-                        | Some v ->
-                            match subvars.TryGetValue x with
-                            | false, _ -> subvars.[x] <- Array.fold (fun s -> function Variable x -> Set.add x s | Constant _ -> s) Set.empty v
-                            | true, _ -> ()
-                            v
-                        | None -> [|x'|]
-                    | Constant _ as x' -> [|x'|]
-                    ) desc
+        let substitute (m : Map<string, Symbols>) (desc : Symbols) =
+            let subvars = Dictionary(HashIdentity.Structural)
+            subvars,
+            Array.collect (function
+                | Variable x as x' ->
+                    match Map.tryFind x m with
+                    | Some v ->
+                        match subvars.TryGetValue x with
+                        | false, _ -> subvars.[x] <- Array.fold (fun s -> function Variable x -> Set.add x s | Constant _ -> s) Set.empty v
+                        | true, _ -> ()
+                        v
+                    | None -> [|x'|]
+                | Constant _ as x' -> [|x'|]
+                ) desc
 
-            let disjointness_check (disjoint_vars : Map<string, Set<string>>) (substs_map : Dictionary<string, Set<string>>) =
-                let fails = ResizeArray()
+        let disjointness_check (disjoint_vars : Map<string, Set<string>>) (substs_map : Dictionary<string, Set<string>>) =
+            let fails = ResizeArray()
 
-                let check (kv : KeyValuePair<_,_>) next prev = 
-                    let var', subvars' as cur = kv.Key, kv.Value
-                    match prev with
-                    | None -> ()
-                    | Some (var, subvars) as prev ->
+            let check (kv : KeyValuePair<_,_>) next prev = 
+                let var', subvars' = kv.Key, kv.Value
+                match prev with
+                | None -> Option.iter (fun d' -> next (Some (var',subvars',d'))) (Map.tryFind var' disjoint_vars)
+                | Some (var, subvars, d) ->
+                    if Set.contains var' d then
                         Set.iter (fun v ->
-                            let v_disjoint_vars =
-                                match Map.tryFind v disjoint_vars with
-                                | None -> Set.empty
-                                | Some v_disjoint_vars -> v_disjoint_vars
+                            let v_disjoint_vars = Option.defaultValue Set.empty (Map.tryFind v disjoint_vars)
                             if Set.isEmpty (subvars' - v_disjoint_vars) = false then fails.Add((var,v),(var',subvars'))
                             ) subvars
-                        next prev
-                    next (Some cur)
+                next prev
 
-                Seq.foldBack check substs_map (fun _ -> ()) None
-                fails.ToArray()
+            Seq.foldBack check substs_map (fun _ -> ()) None
+            fails.ToArray()
 
+        let assert_non_disjoint disjoint substituted_vars on_succ on_fail =
+            let r = disjointness_check disjoint substituted_vars
+            if Array.isEmpty r then on_succ ()
+            else 
+                Array.map (fun ((var,v),(var',subvars)) -> sprintf "The disjointness check for %s and %s failed. %s does not interstect %A" var var' v subvars) r
+                |> String.concat "\n"
+                |> on_fail
+
+        let prove_mandatory m hyp item on_succ on_fail =
             match hyp, item with
             | Floating(c,v),(c',v') -> if c = c' then on_succ (Map.add v v' m) else on_fail (error_typecode c c')
             | Essential(c,sym_seq,disjoint),(c',sym_seq') -> 
                 if c = c' then
                     let substituted_vars, sym_seq = substitute m sym_seq
-                    if sym_seq = sym_seq' then 
-                        let r = disjointness_check disjoint substituted_vars
-                        if Array.isEmpty r then on_succ m
-                        else 
-                            Array.map (fun ((var,v),(var',subvars)) -> sprintf "The disjointness check for %s and %s failed. %s does not interstect %A" var var' v subvars) r
-                            |> String.concat "\n"
-                            |> on_fail
-                    else
-                        on_fail (error_body (c,sym_seq) (c', sym_seq'))
+                    if sym_seq = sym_seq' then assert_non_disjoint disjoint substituted_vars (fun () -> on_succ m) on_fail
+                    else on_fail (error_body (c,sym_seq) (c', sym_seq'))
                 else on_fail (error_typecode c c')
             | _ -> failwith "impossible"
 
@@ -241,9 +245,11 @@ let proof label s =
             let rec pop i = if i > 0 then stack_items.[i-1] <- stack.Pop(); pop (i-1) else ()
             pop hyps.Length
         
-            let rec loop i s = 
-                if i < hyps.Length then prove_mandatory s hyps.[i] stack_items.[i] (loop (i+1)) (on_fail << sprintf "(error for item %i out of %i) %s" (i+1) hyps.Length)
-                else on_succ()
+            let rec loop i m = 
+                if i < hyps.Length then prove_mandatory m hyps.[i] stack_items.[i] (loop (i+1)) (on_fail << sprintf "(error for item %i out of %i) %s" (i+1) hyps.Length)
+                else 
+                    let substituted_vars, sym_seq = substitute m sym_seq
+                    assert_non_disjoint disjoint substituted_vars (fun () -> stack.Push(con,sym_seq); on_succ()) on_fail 
             loop 0 Map.empty
 
     (
@@ -280,10 +286,6 @@ let block next s =
         r
     between (skip_string "${") (terminal "$}") (f (skipMany next)) s
 
-let comment next s = 
-    let rec body s = (charsTillString "$" true System.Int32.MaxValue >>. (skipChar ')' <|> (skipChar '(' >>. fail "Nested comments are not allowed.") <|> body)) s
-    (skipMany (skipString "$(" >>. body >>. (spaces1 <|> eof)) >>. next) s
-
 let checked_label s = 
     let proceed_if_inactive_label label (s : CharStream<_>) =
         if s.UserState.labels.ContainsKey label = false then Reply(label)
@@ -292,18 +294,16 @@ let checked_label s =
 
 let rec parser s =
     let rec inner s = 
-        comment
-            (choice [|
-                checked_label >>= fun label -> spaces1 >>. choice [|floating label; essential label; axiom label; proof label|]
-                vars; disjoint; block inner
-                |]) s
+        choice [|
+            checked_label >>= fun label -> spaces1 >>. choice [|floating label; essential label; axiom label; proof label|]
+            vars; disjoint; block inner
+            |] s
     
     let outer s = 
-        comment
-            (choice [|
-                checked_label >>= fun label -> spaces1 >>. choice [|floating label; essential label; axiom label; proof label|]
-                vars; disjoint; block inner; cons; file_include
-                |]) s
+        choice [|
+            checked_label >>= fun label -> spaces1 >>. choice [|floating label; essential label; axiom label; proof label|]
+            vars; disjoint; block inner; cons; file_include
+            |] s
 
     (spaces >>. skipMany outer .>> eof) s
 
@@ -359,7 +359,7 @@ mp $a |- Q $.
 $}
 $( Prove a theorem $)
 th1 $p |- t = t $=
-
+$( Here is its proof: $)
 tt tze tpl tt weq tt tt weq tt a2 tt tze tpl
 tt weq tt tze tpl tt weq tt tt weq wim tt a2
 tt tze tpl tt tt a1 mp mp
