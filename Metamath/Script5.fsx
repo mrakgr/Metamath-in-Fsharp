@@ -174,7 +174,78 @@ let print_body (c, v) =
 let error_typecode c c' = sprintf "Unification failed. Typecode %s <> %s" c c'
 let error_body a b = sprintf "Unification failed. %s <> %s" (print_body a) (print_body b)
 
-let proof prove label s = 
+let proof label s = 
+    
+    /// Proving
+    let prove (stack : Stack<_>) x on_succ on_fail = 
+        let prove_mandatory m hyp item on_succ on_fail =
+            let substitute (m : Map<string, Symbols>) (desc : Symbols) =
+                let subvars = Dictionary(HashIdentity.Structural)
+                subvars,
+                Array.collect (function
+                    | Variable x as x' ->
+                        match Map.tryFind x m with
+                        | Some v ->
+                            match subvars.TryGetValue x with
+                            | false, _ -> subvars.[x] <- Array.fold (fun s -> function Variable x -> Set.add x s | Constant _ -> s) Set.empty v
+                            | true, _ -> ()
+                            v
+                        | None -> [|x'|]
+                    | Constant _ as x' -> [|x'|]
+                    ) desc
+
+            let disjointness_check (disjoint_vars : Map<string, Set<string>>) (substs_map : Dictionary<string, Set<string>>) =
+                let fails = ResizeArray()
+
+                let check (kv : KeyValuePair<_,_>) next prev = 
+                    let var', subvars' as cur = kv.Key, kv.Value
+                    match prev with
+                    | None -> ()
+                    | Some (var, subvars) as prev ->
+                        Set.iter (fun v ->
+                            let v_disjoint_vars =
+                                match Map.tryFind v disjoint_vars with
+                                | None -> Set.empty
+                                | Some v_disjoint_vars -> v_disjoint_vars
+                            if Set.isEmpty (subvars' - v_disjoint_vars) = false then fails.Add((var,v),(var',subvars'))
+                            ) subvars
+                        next prev
+                    next (Some cur)
+
+                Seq.foldBack check substs_map (fun _ -> ()) None
+                fails.ToArray()
+
+            match hyp, item with
+            | Floating(c,v),(c',v') -> if c = c' then on_succ (Map.add v v' m) else on_fail (error_typecode c c')
+            | Essential(c,sym_seq,disjoint),(c',sym_seq') -> 
+                if c = c' then
+                    let substituted_vars, sym_seq = substitute m sym_seq
+                    if sym_seq = sym_seq' then 
+                        let r = disjointness_check disjoint substituted_vars
+                        if Array.isEmpty r then on_succ m
+                        else 
+                            Array.map (fun ((var,v),(var',subvars)) -> sprintf "The disjointness check for %s and %s failed. %s does not interstect %A" var var' v subvars) r
+                            |> String.concat "\n"
+                            |> on_fail
+                    else
+                        on_fail (error_body (c,sym_seq) (c', sym_seq'))
+                else on_fail (error_typecode c c')
+            | _ -> failwith "impossible"
+
+        match x with
+        | Floating(c,v) -> stack.Push(c,[|Variable v|]); on_succ()
+        | Essential _ -> on_fail "Essential hypotheses are not directly usable."
+        | Proof(con,sym_seq,disjoint,hyps) | Axiom(con,sym_seq,disjoint,hyps) when hyps.Length > stack.Count -> on_fail "Not enough hypotheses on stack."
+        | Proof(con,sym_seq,disjoint,hyps) | Axiom(con,sym_seq,disjoint,hyps) ->
+            let stack_items = Array.zeroCreate hyps.Length
+            let rec pop i = if i > 0 then stack_items.[i-1] <- stack.Pop(); pop (i-1) else ()
+            pop hyps.Length
+        
+            let rec loop i s = 
+                if i < hyps.Length then prove_mandatory s hyps.[i] stack_items.[i] (loop (i+1)) (on_fail << sprintf "(error for item %i out of %i) %s" (i+1) hyps.Length)
+                else on_succ()
+            loop 0 Map.empty
+
     (
     skip_string "$p" >>.
     tuple2 (active_constant .>> spaces1) (many_array (floating_math_symbol .>> spaces1)) 
@@ -219,90 +290,20 @@ let checked_label s =
         else er_label_is_active label
     (label >>= proceed_if_inactive_label) s
 
-let rec parser prove s =
+let rec parser s =
     let rec body s = 
         choice [|
-            checked_label >>= fun label -> spaces1 >>. choice [|floating label; essential label; axiom label; proof prove label|]
-            vars; disjoint; comment >>. body; block body; file_include prove
+            checked_label >>= fun label -> spaces1 >>. choice [|floating label; essential label; axiom label; proof label|]
+            vars; disjoint; comment >>. body; block body
             |] s
 
-    (skipMany (choice [|cons; file_include prove; body|] .>> eof)) s
+    (skipMany (choice [|cons; file_include; body|] .>> eof)) s
 
-and file_include prove (s : CharStream<_>) =
+and file_include (s : CharStream<_>) =
     (
     label >>= fun x s ->
-        match runParserOnFile (parser prove) s.UserState "" System.Text.Encoding.Default with
+        match runParserOnFile parser s.UserState "" System.Text.Encoding.Default with
         | Success(r,u,_) -> s.UserState <- u; Reply(r)
         | Failure(msg,_,_) -> er msg
     ) s
 
-/// Proving
-
-let substitute (m : Map<string, Symbols>) (desc : Symbols) =
-    let subvars = Dictionary(HashIdentity.Structural)
-    subvars,
-    Array.collect (function
-        | Variable x as x' ->
-            match Map.tryFind x m with
-            | Some v ->
-                match subvars.TryGetValue x with
-                | false, _ -> subvars.[x] <- Array.fold (fun s -> function Variable x -> Set.add x s | Constant _ -> s) Set.empty v
-                | true, _ -> ()
-                v
-            | None -> [|x'|]
-        | Constant _ as x' -> [|x'|]
-        ) desc
-
-let disjointness_check (disjoint_vars : Map<string, Set<string>>) (substs_map : Dictionary<string, Set<string>>) =
-    let fails = ResizeArray()
-
-    let check (kv : KeyValuePair<_,_>) next prev = 
-        let var', subvars' as cur = kv.Key, kv.Value
-        match prev with
-        | None -> ()
-        | Some (var, subvars) as prev ->
-            Set.iter (fun v ->
-                let v_disjoint_vars =
-                    match Map.tryFind v disjoint_vars with
-                    | None -> Set.empty
-                    | Some v_disjoint_vars -> v_disjoint_vars
-                if Set.isEmpty (subvars' - v_disjoint_vars) = false then fails.Add((var,v),(var',subvars'))
-                ) subvars
-            next prev
-        next (Some cur)
-
-    Seq.foldBack check substs_map (fun _ -> ()) None
-    fails.ToArray()
-
-let inline prove_mandatory m hyp item on_succ on_fail =
-    match hyp, item with
-    | Floating(c,v),(c',v') -> if c = c' then on_succ (Map.add v v' m) else on_fail (error_typecode c c')
-    | Essential(c,sym_seq,disjoint),(c',sym_seq') -> 
-        if c = c' then
-            let substituted_vars, sym_seq = substitute m sym_seq
-            if sym_seq = sym_seq' then 
-                let r = disjointness_check disjoint substituted_vars
-                if Array.isEmpty r then on_succ m
-                else 
-                    Array.map (fun ((var,v),(var',subvars)) -> sprintf "The disjointness check for %s and %s failed. %s does not interstect %A" var var' v subvars) r
-                    |> String.concat "\n"
-                    |> on_fail
-            else
-                on_fail (error_body (c,sym_seq) (c', sym_seq'))
-        else on_fail (error_typecode c c')
-    | _ -> failwith "impossible"
-
-let prove (stack : Stack<_>) x on_succ on_fail = 
-    match x with
-    | Floating(c,v) -> stack.Push(c,[|Variable v|]); None
-    | Essential _ -> Some "Essential hypotheses are not directly usable."
-    | Proof(con,sym_seq,disjoint,hyps) | Axiom(con,sym_seq,disjoint,hyps) when hyps.Length > stack.Count -> Some "Not enough hypotheses on stack."
-    | Proof(con,sym_seq,disjoint,hyps) | Axiom(con,sym_seq,disjoint,hyps) ->
-        let stack_items = Array.zeroCreate hyps.Length
-        let rec pop i = if i > 0 then stack_items.[i-1] <- stack.Pop(); pop (i-1) else ()
-        pop hyps.Length
-        
-        let rec loop i s = 
-            if i < hyps.Length then prove_mandatory s hyps.[i] stack_items.[i] (loop (i+1)) (on_fail << sprintf "(error for item %i out of %i) %s" (i+1) hyps.Length)
-            else on_succ()
-        loop 0 Map.empty
