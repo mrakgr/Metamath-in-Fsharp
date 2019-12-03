@@ -63,7 +63,7 @@ let var s =
     (math_symbol >>= fun x s -> 
         let u = s.UserState
         let a = u.vars
-        if Map.containsKey x a then s.UserState <- {u with vars=Map.add x None a}; Reply(())
+        if Map.containsKey x a = false then s.UserState <- {u with vars=Map.add x None a}; Reply(())
         else er (sprintf "Variable %s is already active." x)
         ) s
 
@@ -71,7 +71,7 @@ let con s =
     (math_symbol >>= fun x s -> 
         let u = s.UserState
         let a = u.cons
-        if a.Contains x then a.Add x |> ignore; Reply(x)
+        if a.Contains x = false then a.Add x |> ignore; Reply(x)
         else er (sprintf "Constant %s is already active." x)
         ) s
 
@@ -85,13 +85,13 @@ let is_floating_var x u =
 
 let active_constant s = (math_symbol >>= proceed_if_active (fun x u -> u.cons.Contains x)) s
 let active_variable s = (math_symbol >>= proceed_if_active (fun x u -> Map.containsKey x u.vars)) s
-let floating_math_symbol s = 
+let active_math_symbol s = 
     (math_symbol >>= fun x s ->
         let u : State = s.UserState
         if u.cons.Contains x then Reply(Constant x)
         else match Map.tryFind x u.vars with
-             | Some(Some t) -> Reply(Variable x)
-             | _ -> er (sprintf "%s is neither a constant nor an active variable" x)
+             | Some _ -> Reply(Variable x)
+             | _ -> er (sprintf "%s is neither a constant nor an active variable." x)
         ) s
 
 let er_label_is_active label = er (sprintf "Label %s is already active." label)
@@ -119,7 +119,7 @@ let free_vars (u : State) ar =
 let essential label s =
     (
     skip_string "$e" >>.
-    tuple2 (active_constant .>> spaces1) (many_array (floating_math_symbol .>> spaces1) .>> terminal "$.") 
+    tuple2 (active_constant .>> spaces1) (many_array (active_math_symbol .>> spaces1) .>> terminal "$.") 
     >>= fun (c, v) -> updateUserState (fun u -> 
         let tag = tag_create u label
         u.statements.Add(tag,Essential(c,v,u.disjoints))
@@ -158,7 +158,7 @@ let modifyUserState f (s: CharStream<_>) = f s.UserState; Reply(())
 let axiom label s = 
     (
     skip_string "$a" >>.
-    tuple2 (active_constant .>> spaces1) (many_array (floating_math_symbol .>> spaces1))
+    tuple2 (active_constant .>> spaces1) (many_array (active_math_symbol .>> spaces1))
     >>= fun (c,sym_seq) -> modifyUserState (fun u -> 
         let tag = tag_create u label
         u.statements.Add(tag,Axiom(c,sym_seq,u.disjoints,labels_to_statements u (free_vars u sym_seq + u.essentials)))
@@ -248,7 +248,7 @@ let proof label s =
 
     (
     skip_string "$p" >>.
-    tuple2 (active_constant .>> spaces1) (many_array (floating_math_symbol .>> spaces1)) 
+    tuple2 (active_constant .>> spaces1) (many_array (active_math_symbol .>> spaces1)) 
     .>> skip_string "$="
     >>= fun (c,sym_seq) ->
         let stack = Stack()
@@ -273,16 +273,16 @@ let proof label s =
     ) s
 
 let block next s =
-    let f next (s : CharStream<_>) = 
+    let f next (s : CharStream<State>) = 
         let u = s.UserState
         let r = next s
         s.UserState <- {s.UserState with vars=u.vars; disjoints=u.disjoints; essentials=u.essentials}
         r
     between (skip_string "${") (terminal "$}") (f (skipMany next)) s
 
-let comment s = 
+let comment next s = 
     let rec body s = (charsTillString "$" true System.Int32.MaxValue >>. (skipChar ')' <|> (skipChar '(' >>. fail "Nested comments are not allowed.") <|> body)) s
-    (skipString "$(" >>. body >>. (spaces1 <|> eof)) s
+    (skipMany (skipString "$(" >>. body >>. (spaces1 <|> eof)) >>. next) s
 
 let checked_label s = 
     let proceed_if_inactive_label label (s : CharStream<_>) =
@@ -291,13 +291,21 @@ let checked_label s =
     (label >>= proceed_if_inactive_label) s
 
 let rec parser s =
-    let rec body s = 
-        choice [|
-            checked_label >>= fun label -> spaces1 >>. choice [|floating label; essential label; axiom label; proof label|]
-            vars; disjoint; comment >>. body; block body
-            |] s
+    let rec inner s = 
+        comment
+            (choice [|
+                checked_label >>= fun label -> spaces1 >>. choice [|floating label; essential label; axiom label; proof label|]
+                vars; disjoint; block inner
+                |]) s
+    
+    let outer s = 
+        comment
+            (choice [|
+                checked_label >>= fun label -> spaces1 >>. choice [|floating label; essential label; axiom label; proof label|]
+                vars; disjoint; block inner; cons; file_include
+                |]) s
 
-    (skipMany (choice [|cons; file_include; body|] .>> eof)) s
+    (spaces >>. skipMany outer .>> eof) s
 
 and file_include (s : CharStream<_>) =
     (
@@ -307,3 +315,57 @@ and file_include (s : CharStream<_>) =
         | Failure(msg,_,_) -> er msg
     ) s
 
+let verify prog =
+    let userstate = 
+        {
+        disjoints = Map.empty
+        vars = Map.empty
+        essentials = Set.empty
+
+        cons = HashSet(HashIdentity.Structural)
+        labels = Dictionary(HashIdentity.Structural)
+        statements = Dictionary(HashIdentity.Structural)
+        } 
+
+    runParserOnString parser userstate "main" prog 
+
+/// Testing
+
+let demo =
+    """
+$( Declare the constant symbols we will use $)
+$c 0 + = -> ( ) term wff |- $.
+$( Declare the metavariables we will use $)
+$v t r s P Q $.
+$( Specify properties of the metavariables $)
+tt $f term t $.
+tr $f term r $.
+ts $f term s $.
+wp $f wff P $.
+wq $f wff Q $.
+$( Define "term" and "wff" $)
+tze $a term 0 $.
+tpl $a term ( t + r ) $.
+weq $a wff t = r $.
+wim $a wff ( P -> Q ) $.
+$( State the axioms $)
+a1 $a |- ( t = r -> ( t = s -> r = s ) ) $.
+a2 $a |- ( t + 0 ) = t $.
+$( Define the modus ponens inference rule $)
+${
+min $e |- P $.
+maj $e |- ( P -> Q ) $.
+mp $a |- Q $.
+$}
+$( Prove a theorem $)
+th1 $p |- t = t $=
+
+tt tze tpl tt weq tt tt weq tt a2 tt tze tpl
+tt weq tt tze tpl tt weq tt tt weq wim tt a2
+tt tze tpl tt tt a1 mp mp
+$.
+    """
+
+match verify demo with
+| Success _ -> printfn "Verification finished successfully."
+| Failure(msg,b,c) -> printfn "%s" msg
