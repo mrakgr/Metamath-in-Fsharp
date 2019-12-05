@@ -1,4 +1,6 @@
-﻿#if INTERACTIVE
+﻿open System
+
+#if INTERACTIVE
 #r @"packages\FParsec.1.1.0-RC\lib\net45\FParsecCS.dll"
 #r @"packages\FParsec.1.1.0-RC\lib\net45\FParsec.dll"
 #endif
@@ -25,7 +27,22 @@ type Tokenizer() =
     member _.Count = tag_to_string.Count
 
 type Position = int64
-type Token = {tag : Tag; pos : Position}
+type [<CustomEquality;CustomComparison>] Token = 
+    {tag : Tag; pos : Position}
+
+    override a.Equals(b) = 
+        match b with
+        | :? Token as b -> a.tag = b.tag
+        | _ -> false
+
+    override a.GetHashCode() = a.tag
+
+    interface IComparable with
+        member a.CompareTo(b) = 
+            match b with
+            | :? Token as b -> compare a.tag b.tag
+            | _ -> raise <| ArgumentException "Invalid comparison for Token."
+
 type Label = Token
 type Symbol = Token
 
@@ -101,113 +118,196 @@ let rec tokenize is_outer s =
         ] s
 and many_tokenize = spaces >>. many_array (tokenize true) .>> eof
 
-type Disjoins = Set<Tag * Tag>
+type Disjoints = (Tag * Tag) []
 type MMExpr = 
 | ExprFloating of Label * Symbol * Symbol
-| ExprEssential of Label * Symbol * Symbol [] * Disjoins * hyps : MMExpr []
-| ExprAxiom of Label * Symbol * Symbol [] * Disjoins * hyps : MMExpr []
-| ExprProof of Label * Symbol * Symbol [] * Disjoins * hyps : MMExpr [] * proof : MMExpr []
+| ExprEssential of Label * Symbol * Symbol [] * Disjoints * hyps : MMExpr []
+| ExprAxiom of Label * Symbol * Symbol [] * Disjoints * hyps : MMExpr []
+| ExprProof of Label * Symbol * Symbol [] * Disjoints * hyps : MMExpr [] * proof : MMExpr []
 
 type State = {
     // Local
-    vars_active : Set<Tag>
-    vars_floating : Set<Tag>
-    statements_floating : Label list
-    statements_essential : Label list
-    disjoint : Set<Tag * Tag>
+    vars_active : Map<Tag,Position> // Symbol
+    vars_floating : Map<Tag,Position> // Symbol
+    hyps_in_scope : Map<Tag,Position> // Label
+    disjoint : Set<Tag * Tag> // Symbol * Symbol
     }
 
 type SemanticError =
-| DuplicateVar of Symbol
-| DuplicateCon of Symbol
+| DuplicateVar of Symbol * Symbol
+| DuplicateCon of Symbol * Symbol
 | FloatingStatementVarInactive of Symbol
-| FloatingStatementVarAlreadyFloating of Symbol
+| FloatingStatementVarAlreadyFloating of Symbol * Symbol
 | DuplicateLabel of Label * Label
 | LabelNotFound of Label
 | DuplicateDisjoint of Symbol * Symbol
 | SymbolInactive of Symbol
+| LabelOutOfScope of Label
+| NotEnoughArgumentsOnStack of Label
+| UnificationErrorLabelHypFloating of ((int * int) * Label) * (Symbol * Symbol) * (Symbol * Symbol [])
+| UnificationErrorLabelHypEssential of ((int * int) * Label) * (Symbol * Symbol []) * (Symbol * Symbol [])
+| StackNotOne of Stack<Symbol * Symbol []>
+| UnficationErrorProof of Label * (Symbol * Symbol []) * (Symbol * Symbol [])
+| DisjointNotActiveVar of Symbol
+| DisjointVarViolationsLabelHyp of ((int * int) * Label) * ((Tag * Tag) * (Tag * Tag)) []
+| DisjointVarViolationsLabel of Label * ((Tag * Tag) * (Tag * Tag)) []
 
 exception SemanticException of SemanticError
 
-let ord' a b = if a < b then a,b else b,a
-let ord (a : Symbol) (b : Symbol) = ord' a.tag b.tag
+let ord a b = if a < b then a,b else b,a
 let disjoins_fold f s l =
     let rec loop1 i s =
         let rec loop2 j s = if j < l then loop2 (j+1) (f i j s) else loop1 (i+1) s
         if i < l then loop2 (i+1) s else s
     loop1 0 s
 
-let semantic prove (x : MMToken []) = 
+let semantic (x : MMToken []) = 
     let er x = raise (SemanticException x)
     let global_statements = Dictionary(HashIdentity.Structural)
-    let active_constants = HashSet(HashIdentity.Structural)
-    let disjoint_try_ord (a : Symbol) (b : Symbol) = if a.tag = b.tag then er (DuplicateDisjoint(a, b)) else ord a b
+    let active_constants = Dictionary(HashIdentity.Structural)
+    let disjoint_assert_ord (a : Symbol) (b : Symbol) = if a = b then er (DuplicateDisjoint(a, b)) else ord a b
     let label = function ExprFloating(x,_,_) | ExprEssential(x,_,_,_,_) | ExprAxiom(x,_,_,_,_) | ExprProof(x,_,_,_,_,_) -> x
-    let global_try_add t =
+    let global_statements_assert_add t =
         let x = label t
         match global_statements.TryGetValue x.tag with
         | true, t' -> er (DuplicateLabel(x,label t'))
         | false, _ -> global_statements.Add(x.tag,t)
-    let global_try_get x =
+    let global_statements_assert_get x =
         match global_statements.TryGetValue x.tag with
         | true, t' -> t'
         | false, _ -> er (LabelNotFound x)
 
     let mandatory (s : State) (v : Symbol []) = 
-        let free_vars =
+        let free_vars' = 
             let free_vars = HashSet(HashIdentity.Structural)
             v |> Array.iter (fun x ->
-                if Set.contains x.tag s.vars_active then free_vars.Add(x.tag) |> ignore
-                elif active_constants.Contains x.tag then ()
+                if Map.containsKey x.tag s.vars_active then free_vars.Add(x.tag) |> ignore
+                elif active_constants.ContainsKey x.tag then ()
                 else er (SymbolInactive x)
                 )
-            Seq.toArray free_vars
-        let disjoins_free_vars_filtered = 
-            disjoins_fold (fun i j d -> 
-                let ab = ord' free_vars.[i] free_vars.[j]
-                if Set.contains ab s.disjoint then Set.add ab d else d
-                ) Set.empty free_vars.Length
-        let hyps =
-            let rec loop = function
-                | f :: fs, e :: es -> if f.tag < e.tag then f :: loop (fs, e :: es) else e :: loop (f :: fs, es)
-                | [], l | l, [] -> l
-            loop (List.rev s.statements_floating, List.rev s.statements_essential)
-            |> List.toArray |> Array.map global_try_get
-        disjoins_free_vars_filtered, hyps
-
+            free_vars
+        let free_vars = Seq.toArray free_vars'
+        let disjoints_given_free_vars = 
+            let disjoints_given_free_vars = ResizeArray()
+            disjoins_fold (fun i j () -> 
+                let ab = ord free_vars.[i] free_vars.[j]
+                if Set.contains ab s.disjoint then disjoints_given_free_vars.Add ab
+                ) () free_vars.Length
+            disjoints_given_free_vars.ToArray()
+        let hyps = 
+            Map.toArray s.hyps_in_scope 
+            |> Array.choose (fun (tag,pos) -> 
+                match global_statements_assert_get {tag=tag; pos=pos} with
+                | ExprFloating(_,_,v) as r -> if free_vars'.Contains v.tag then Some r else None
+                | ExprEssential _ as r -> Some r
+                | _ -> failwith "impossible"
+                )
+        disjoints_given_free_vars, hyps
+        
     let rec loop s (x : MMToken []) =
         Array.fold (fun (s : State) x ->
             match x with
             | TokVars v -> 
-                let f (s : Set<Tag>) (x : Symbol) = if Set.contains x.tag s then er (DuplicateVar x) else Set.add x.tag s
+                let f (s : Map<Tag,Position>) (x : Symbol) = 
+                    match Map.tryFind x.tag s with
+                    | Some pos -> er (DuplicateVar({tag=x.tag; pos=pos}, x))
+                    | None -> Map.add x.tag x.pos s
                 { s with vars_active = Array.fold f s.vars_active v}
             | TokCons c ->
-                Array.iter (fun (x : Symbol) -> if active_constants.Add x.tag then er (DuplicateCon x) else ()) c
+                Array.iter (fun (x : Symbol) -> 
+                    match active_constants.TryGetValue x.tag with
+                    | false, _ -> active_constants.Add(x.tag,x.pos)
+                    | true, pos -> er (DuplicateCon({tag=x.tag; pos=pos}, x))
+                    ) c
                 s
             | TokDisjoint d ->
-                { s with disjoint = disjoins_fold (fun i j s -> Set.add (disjoint_try_ord d.[i] d.[j]) s) s.disjoint 0 }
+                Array.iter (fun a -> if Map.containsKey a.tag s.vars_active = false then er (DisjointNotActiveVar a)) d
+                { s with 
+                    disjoint = 
+                        disjoins_fold (fun i j s' -> 
+                            let a,b = disjoint_assert_ord d.[i] d.[j]
+                            Set.add (a.tag,b.tag) s'
+                            ) s.disjoint 0 }
             | TokFloating(l,c,v) ->
-                global_try_add (ExprFloating(l,c,v))
-                if Set.contains v.tag s.vars_active then
-                    if Set.contains v.tag s.vars_floating = false then 
-                        {s with vars_floating=Set.add v.tag s.vars_floating; statements_floating=l :: s.statements_floating}
-                    else er (FloatingStatementVarAlreadyFloating v)
+                global_statements_assert_add (ExprFloating(l,c,v))
+                if Map.containsKey v.tag s.vars_active then
+                    match Map.tryFind v.tag s.vars_floating with
+                    | None -> {s with vars_floating=Map.add v.tag v.pos s.vars_floating; hyps_in_scope=Map.add l.tag l.pos s.hyps_in_scope}
+                    | Some pos -> er (FloatingStatementVarAlreadyFloating({tag=v.tag; pos=pos}, v))
                 else er (FloatingStatementVarInactive v)
             | TokEssential(l,c,v) ->
                 let disjoints, hyps = mandatory s v
-                global_try_add (ExprEssential(l,c,v,disjoints,hyps))
-                {s with statements_essential=l :: s.statements_essential}
+                global_statements_assert_add (ExprEssential(l,c,v,disjoints,hyps))
+                {s with hyps_in_scope=Map.add l.tag l.pos s.hyps_in_scope}
             | TokAxiom(l,c,v) ->
                 let disjoints, hyps = mandatory s v
-                global_try_add (ExprAxiom(l,c,v,disjoints,hyps))
-                s
-            | TokProof(l,c,v,p) ->
-                let disjoints, hyps = mandatory s v
-                let p = Array.map global_try_get p
-                global_try_add (ExprProof(l,c,v,disjoints,hyps,p))
-                prove (l,c,v,s.disjoint,hyps,p)
+                global_statements_assert_add (ExprAxiom(l,c,v,disjoints,hyps))
                 s
             | TokInclude l -> loop s l
             | TokBlock l -> loop s l |> ignore; s 
+            | TokProof(l,c,v,proof_label) ->
+                let proof_expr =
+                    let disjoint, hyps = mandatory s v
+                    let p = 
+                        proof_label |> Array.map (fun x ->
+                            match global_statements_assert_get x with
+                            | ExprAxiom _ | ExprProof _ as r -> r
+                            | ExprFloating _ | ExprEssential _ as r -> if Map.containsKey x.tag s.hyps_in_scope then r else er (LabelOutOfScope x)
+                            )
+                    global_statements_assert_add (ExprProof(l,c,v,disjoint,hyps,p))
+                    p
+                let _ =
+                    let stack = Stack()
+                    (proof_label, proof_expr) ||> Array.iter2 (fun l -> function
+                        | ExprFloating(_,c,v) -> stack.Push(c,[|v|])
+                        | ExprEssential(_,c,v,_,_) -> stack.Push(c,v)
+                        | ExprAxiom(_,c,v,d,hyps) | ExprProof(_,c,v,d,hyps,_) ->
+                            if stack.Count < hyps.Length then er (NotEnoughArgumentsOnStack l)
+
+                            let assert_disjoints (d : Disjoints) (m : Map<Tag, Symbol []>) on_fail =
+                                let m = Map.map (fun _ -> Array.choose (fun x -> if active_constants.ContainsKey x.tag = false then Some x.tag else None) >> Array.distinct) m
+                                let errors = Stack()
+                                d |> Array.iter (fun (a,b) ->
+                                    Array.iter (fun a' ->
+                                        Array.iter (fun b' ->
+                                            if a' = b' || Set.contains (ord a' b') s.disjoint = false then errors.Push((a,b),(a',b'))
+                                            ) m.[b]
+                                        ) m.[a]
+                                    )
+                                if errors.Count > 0 then er (on_fail (errors.ToArray()))
+
+                            let substitute (m : Map<Tag, Symbol []>) (v : Symbol []) =
+                                Array.collect (fun x ->
+                                    match Map.tryFind x.tag m with
+                                    | Some v -> v
+                                    | None -> [|x|]
+                                    ) v
+
+                            Array.mapFoldBack (fun x () -> (x,stack.Pop()),()) hyps ()
+                            |> fst |> Array.fold (fun (m, i) (hyp,(c',v')) ->
+                                match hyp with
+                                | ExprFloating(_,c,v) -> 
+                                    if c = c' then Map.add v.tag v' m
+                                    else er (UnificationErrorLabelHypFloating (((i,hyps.Length),l),(c,v),(c',v')))
+                                | ExprEssential(_,c,v,d,_) -> 
+                                    assert_disjoints d m (fun e -> DisjointVarViolationsLabelHyp(((i,hyps.Length),l), e))
+                                    let v = substitute m v
+                                    if c = c' && v = v' then m
+                                    else er (UnificationErrorLabelHypEssential (((i,hyps.Length),l),(c,v),(c',v')))
+                                | _ -> failwith "impossible"
+                                |> fun m -> m, i+1
+                                ) (Map.empty, 1)
+                            |> fun (m,_) -> 
+                                assert_disjoints d m (fun e -> DisjointVarViolationsLabel(l, e))
+                                stack.Push(c,substitute m v)
+                        )
+
+                    if stack.Count = 1 then 
+                        let c', v' = stack.Pop()
+                        if c = c' && v = v' then ()
+                        else er (UnficationErrorProof(l,(c,v),(c',v')))
+                    else er (StackNotOne stack)
+                s
             ) s x
-    loop {vars_active=Set.empty; vars_floating=Set.empty; statements_floating=[]; statements_essential=[]; disjoint=Set.empty} x |> ignore
+    loop {vars_active=Map.empty; vars_floating=Map.empty; hyps_in_scope=Map.empty; disjoint=Set.empty} x |> ignore
+
